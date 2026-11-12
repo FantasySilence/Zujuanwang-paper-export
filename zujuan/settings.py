@@ -55,6 +55,8 @@ TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
 # 下面几项由下载处理器直接读取
 PLAYWRIGHT_HEADLESS = True
 PLAYWRIGHT_TIMEOUT = 60_000
+# 等关键元素的上限：页面正常时 1 秒内就出现，超时说明这页根本不是试卷
+PLAYWRIGHT_WAIT_TIMEOUT = 15_000
 PLAYWRIGHT_STORAGE_STATE = str(paths.AUTH_FILE)
 # domcontentloaded 之后再多等一会儿，让题目内容渲染完
 PLAYWRIGHT_SETTLE_MS = 1200

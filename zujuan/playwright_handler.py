@@ -150,6 +150,8 @@ class PlaywrightDownloadHandler(_BaseHandler):
 
         self.headless = bool(settings.getbool("PLAYWRIGHT_HEADLESS", True))
         self.timeout = int(settings.getint("PLAYWRIGHT_TIMEOUT", 60_000))
+        # 等选择器是最后一道保险，给个短上限，别让“资源不存在”页干等一分钟
+        self.wait_timeout = int(settings.getint("PLAYWRIGHT_WAIT_TIMEOUT", 15_000))
         self.settle_ms = int(settings.getint("PLAYWRIGHT_SETTLE_MS", 1200))
         self.storage_state = settings.get("PLAYWRIGHT_STORAGE_STATE") or None
         self.block_resources = tuple(settings.getlist("PLAYWRIGHT_BLOCK_RESOURCES") or ())
@@ -273,10 +275,15 @@ class PlaywrightDownloadHandler(_BaseHandler):
             if wait_for:
                 # 默认 attached：目标元素可能是隐藏域，等 visible 会白等到超时
                 wait_state = request.meta.get("playwright_wait_state", "attached")
-                try:
-                    await page.wait_for_selector(wait_for, state=wait_state, timeout=self.timeout)
-                except Exception:  # noqa: BLE001 - 结构变化时仍尽量返回页面
-                    logger.warning("[playwright] 等待 %s 超时：%s", wait_for, request.url)
+                # ------ 页面里连题目区都没有（比如“资源不存在”页），就别等满一个 timeout ------ #
+                if await self._has_paper(page):
+                    timeout = int(request.meta.get("playwright_wait_timeout") or self.wait_timeout)
+                    try:
+                        await page.wait_for_selector(wait_for, state=wait_state, timeout=timeout)
+                    except Exception:  # noqa: BLE001 - 结构变化时仍尽量返回页面
+                        logger.warning("[playwright] 等待 %s 超时：%s", wait_for, request.url)
+                else:
+                    logger.info("[playwright] 页面没有题目区，跳过等待：%s", request.url)
 
             if self.settle_ms:
                 await page.wait_for_timeout(self.settle_ms)
@@ -307,6 +314,22 @@ class PlaywrightDownloadHandler(_BaseHandler):
             encoding="utf-8",
             request=request,
         )
+
+    async def _has_paper(self, page: Any) -> bool:
+        
+        """
+        判断当前页面是不是一张试卷（有没有题目区）。
+
+        用 3 秒的短等待去探，因为 domcontentloaded 之后页面常常还会自己跳一次，
+        立刻查 DOM 会碰到“执行上下文被销毁”。试卷页一般 1 秒内就有结果，
+        “资源不存在”页则等满 3 秒返回 False，省掉后面一个长超时。
+        """
+        
+        try:
+            await page.wait_for_selector(".exam-list", state="attached", timeout=3000)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
     async def _expand_answers(self, page: Any, limit: int = 0) -> None:
         """逐题点击，把答案与解析图片展开到 DOM 里。
