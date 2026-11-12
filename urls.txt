@@ -1,0 +1,31 @@
+# ============================================================ #
+# multi_run.py 示例网址列表                                     #
+#                                                              #
+# 用法：                                                       #
+#   python multi_run.py urls.txt                               #
+#   python multi_run.py urls.txt --answers --workers 2         #
+#                                                              #
+# 规则：                                                       #
+#   - 一行一个，空行和 # 开头的行会被忽略                        #
+#   - 普通试卷：https://zujuan.xkw.com/3pXXXXXXXX.html          #
+#   - 自组试卷：https://zujuan.xkw.com/usertk/3pXXXXXXXX.html   #
+#   - 也可以只写编号（3p2856667 或 2856667）                     #
+#   - 带 ?from=xx 之类的查询串会被自动去掉                       #
+# ============================================================ #
+
+# --- 普通试卷（现成的） ---
+https://zujuan.xkw.com/3p2856667.html
+https://zujuan.xkw.com/3p3506327.html
+3p3519776
+
+# --- 自组试卷（个人题库，多一层 /usertk/） ---
+https://zujuan.xkw.com/usertk/3p129898802.html
+
+# --- 只给编号：程序会先按普通试卷打开，没有题目再自动换 /usertk/ 重试 ---
+# 3p129898802
+
+# --- 网址后面带了杂物也能识别（查询串和锚点会被去掉） ---
+https://zujuan.xkw.com/3p3575678.html?from=batch#comments
+
+# --- 故意写个不存在的编号，用来验证「失败不中断整批」 ---
+# https://zujuan.xkw.com/3p999999999.html

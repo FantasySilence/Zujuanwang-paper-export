@@ -16,9 +16,18 @@ from typing import Any
 
 from . import paths
 
+# ------ 批量下载时每份试卷各写一个文件，避免并发互相覆盖（None 表示用默认位置） ------ #
+_status_path: Path | None = None
+
 
 def status_file() -> Path:
-    return paths.LOG_DIR / "last_run.json"
+    return _status_path or (paths.LOG_DIR / "last_run.json")
+
+
+def set_path(path: str | Path | None) -> None:
+    """指定本次运行的状态文件位置，批量下载时每份试卷用各自的文件。"""
+    global _status_path
+    _status_path = Path(path) if path else None
 
 
 def write(*, ok: bool, **extra: Any) -> Path:

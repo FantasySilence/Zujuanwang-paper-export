@@ -51,12 +51,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-cache", action="store_true", help="忽略本地缓存，重新访问站点")
     parser.add_argument("--loglevel", default="INFO", help="Scrapy 日志级别")
+    # ------ 批量下载时给每份试卷指各自的文件，避免并发互相覆盖 ------ #
+    parser.add_argument("--status-file", default="", help="运行结果写到这里（默认 .temp/logs/last_run.json）")
+    parser.add_argument("--log-file", default="", help="Scrapy 日志写到这里（默认 .temp/logs/scrapy.log）")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     paths.ensure_dirs()
+    status.set_path(args.status_file or None)
     status.clear()
     _quiet_asyncio_pipe_noise()
 
@@ -71,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_project_settings()
     # 命令行传进来的日志级别优先于 settings.py 里的默认值
     settings.set("LOG_LEVEL", args.loglevel, priority="cmdline")
+    if args.log_file:
+        settings.set("LOG_FILE", args.log_file, priority="cmdline")
 
     # 一次进程只跑一份试卷，reactor 用完即退，不和交互界面抢事件循环
     process = CrawlerProcess(settings)
@@ -86,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     # 成败不看退出码，看爬虫自己写的状态文件
     result = status.read()
     if not result.get("ok"):
-        message = result.get("error") or "抓取未产生结果，请查看 .temp/logs/scrapy.log"
+        message = result.get("error") or f"抓取未产生结果，请查看 {args.log_file or '.temp/logs/scrapy.log'}"
         print(f"[失败] {message}", file=sys.stderr)
         return 1
     return 0
