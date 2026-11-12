@@ -2,8 +2,8 @@
 # multi_run.py 示例网址列表                                     #
 #                                                              #
 # 用法：                                                       #
-#   python multi_run.py urls.txt                               #
-#   python multi_run.py urls.txt --answers --workers 2         #
+#   python multi_run.py batch\data\urls.txt                    #
+#   python multi_run.py batch\data\urls.txt --answers          #
 #                                                              #
 # 规则：                                                       #
 #   - 一行一个，空行和 # 开头的行会被忽略                        #
