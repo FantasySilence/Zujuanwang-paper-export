@@ -59,13 +59,23 @@ start.bat
 请选择: 
 ```
 
-选 `1`，粘贴形如 `https://zujuan.xkw.com/3p2856667.html` 的网址，按提示回答「是否导答案」「文件叫什么名字」，等十几秒，Word 就会出现在 `output\` 目录里。
+选 `1`，粘贴试卷网址，按提示回答「是否导答案」「文件叫什么名字」，等十几秒，Word 就会出现在 `output\` 目录里。
+
+两种网址都支持：
+
+- 现成试卷：`https://zujuan.xkw.com/3p2856667.html`
+- 自己组的试卷（个人题库）：`https://zujuan.xkw.com/usertk/3p129898802.html`
+
+只输入编号（如 `3p129898802`）也行：程序会先按普通试卷打开，发现没有题目时自动换到 `/usertk/` 地址再试一次。
 
 ### 也可以直接用命令行
 
 ```powershell
 # 导出单份试卷
 .\.venv\Scripts\python.exe run.py https://zujuan.xkw.com/3p2856667.html
+
+# 导出自组试卷（个人题库）
+.\.venv\Scripts\python.exe run.py https://zujuan.xkw.com/usertk/3p129898802.html
 
 # 自定义文件名（不填就用试卷原标题）
 .\.venv\Scripts\python.exe run.py 3p2856667 -n "九年级英语期中卷"
@@ -84,6 +94,71 @@ start.bat
 ```
 
 网址参数也接受纯试卷编号（`3p2856667` 或 `2856667`）。
+
+---
+
+## 批量下载
+
+要一次导几十份，用 `multi_run.py`。它没有交互界面，既能当脚本跑，也能当 Python 接口用。
+
+**命令行**：把网址一行一个写进文本文件（空行、`#` 注释会被忽略）。仓库里带了份 `urls.txt` 示例，直接照着改就行：
+
+```text
+# urls.txt
+https://zujuan.xkw.com/3p2856667.html
+https://zujuan.xkw.com/usertk/3p129898802.html
+3p3506327
+```
+
+```powershell
+.\.venv\Scripts\python.exe multi_run.py urls.txt
+
+# 常用参数
+.\.venv\Scripts\python.exe multi_run.py urls.txt -o output --answers --answers-limit 5
+.\.venv\Scripts\python.exe multi_run.py urls.txt -n 3p2856667=期中卷 -n 3p3506327=二模卷
+```
+
+输出长这样，每份一行，最后一页是汇总：
+
+```text
+[1/3] OK   3p2856667  11题    3.1s  -> 期中卷.docx
+[2/3] OK   3p129898802  12题    3.6s  -> 8.5资料.docx
+[3/3] 失败 3p999999999   10.9s  普通链接和个人题库地址都没有找到这份试卷：请检查编号是否正确
+
+处理完成：成功 2 / 3 份，总耗时 17.4s
+失败清单：
+  - https://zujuan.xkw.com/3p999999999.html：普通链接和个人题库地址都没有找到这份试卷…
+```
+
+**Python 接口**：
+
+```python
+from multi_run import batch_export
+
+results = batch_export(
+    "urls.txt",                 # 也可以是网址列表，或一段带换行的文本
+    out_dir="output",
+    answers=False,              # 是否连带答案解析
+    answers_limit=0,            # 每份最多导多少题答案，0=全部
+    names={"3p2856667": "期中卷"},   # 键可以是编号，也可以是原始网址
+    workers=1,                  # 并发子进程数，默认 1
+    quiet=False,                # True 时完全不打印，适合被别的程序调用
+    on_progress=lambda done, total, r: print(done, "/", total, r.title),
+)
+
+for r in results:
+    print(r.ok, r.paper_id, r.docx_path or r.error)
+```
+
+`BatchResult` 字段：`paper_id / url / ok / title / docx_path / question_count / answer_count / error / elapsed`。
+
+几点说明：
+
+- **单份失败不影响整批**，错误只记在那一条结果里，最后统一列出来
+- **同批重名自动加后缀**（`重复名.docx`、`重复名_2.docx`）；上一轮留下的同名文件是正常覆盖
+- **`workers` 默认 1**。同一域名并发容易被风控，确认站点没反应再逐步调大，2～3 已经够用
+- 每份试卷的状态和日志分别写在 `.temp\logs\batch_<编号>.json` / `.log`，并发时不会串
+- 走的是同一套缓存，重复跑同一批只会变快，不会重复请求
 
 ---
 
@@ -176,6 +251,7 @@ zujuan/
   images.py                图片下载 + 本地缓存
   pipelines.py             JSON / CSV 落盘
   items.py, status.py, paths.py, settings.py
+multi_run.py               批量导出（无交互接口 + 命令行）
 ```
 
 ---
@@ -190,7 +266,12 @@ zujuan/
 该试卷对当前账号需要会员/下载券，工具无法绕过，只能换一份试卷或升级账号。
 
 **提示「站点要求输入验证码」**
-打开菜单 `--no-cache` 重试；仍不行就在浏览器里手动打开该试卷页面完成验证，再回来导出。
+加上 `--no-cache` 重试；仍不行就在浏览器里手动打开该试卷页面完成验证，再回来导出。
+
+**自己组的试卷（个人题库）导不出来**
+这类试卷的网址是 `https://zujuan.xkw.com/usertk/3pXXXXXXXX.html`，比普通试卷多一层 `/usertk/`。
+直接粘贴完整网址即可；只贴编号时程序会自动回退到 `/usertk/` 试一次。
+如果两个地址都提示「没有题目内容」，通常是这份自组试卷已被删除，或当前登录的账号不是它的创建者。
 
 **答案解析图片是「加载超时，请重新进入页面查看」**
 组卷网的答案图片 URL 带时效签名。`--answers` 导出时请**当场生成 Word**（菜单 1 会自动生成），
