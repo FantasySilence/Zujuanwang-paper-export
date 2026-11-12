@@ -29,7 +29,8 @@ from typing import Any
 from . import paths
 
 HOME_URL = "https://zujuan.xkw.com/"
-USER_API = "https://zujuan.xkw.com/zujuan-api/user"
+# 判断登录态的接口（页面内同源请求用相对路径，方便直接喂给 fetch）
+PROBE_PATH = "/zujuan-api/user"
 LOGIN_TIMEOUT_SECONDS = 300
 
 _UA = (
@@ -129,6 +130,87 @@ def _parse_user_script(text: str) -> tuple[bool, str]:
     return logged_in, (name.group(1) if name else "")
 
 
+# 在页面里发同源请求，浏览器会自动带上当前最新的 cookie
+_PROBE_JS = (f"async () => (await fetch('{PROBE_PATH}?t=' + Date.now(), "
+             "{credentials: 'include'})).text()")
+
+
+def _cookie_token(context: Any) -> str:
+    
+    """
+    读当前浏览器里的 user_token，用来判断“登录动作有没有发生”。
+
+    cookie 一变就说明登录完成了，这样可以立刻去复核，不用干等页面刷新。
+    """
+    
+    try:
+        for item in context.cookies():
+            if item.get("name") == "user_token":
+                return item.get("value") or ""
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _probe_login(page: Any, attempts: int = 3) -> tuple[bool, str]:
+    
+    """
+    在页面内查一次登录态，返回 (是否已登录, 用户名)。
+
+    不能用 context.request.get()：那个请求上下文拿的是创建时的 cookie 快照，
+    用户登录后它看到的还是旧的匿名态，所以永远检测不到“登录成功”。
+    页面内 fetch 走浏览器当前的 cookie，但页面本身也要重新加载过才能看到新状态。
+    """
+    
+    for index in range(attempts):
+        try:
+            # ------ 还停在登录页（非组卷网域名）时先不查，避免跨域失败 ------ #
+            if not page.url.startswith("https://zujuan.xkw.com"):
+                return False, ""
+            return _parse_user_script(page.evaluate(_PROBE_JS))
+        except Exception:  # noqa: BLE001 - 页面正在跳转时执行上下文会失效，稍后重试
+            if index + 1 >= attempts:
+                return False, ""
+            page.wait_for_timeout(600)
+    return False, ""
+
+
+def _ensure_probe_page(context: Any, probe: Any) -> Any:
+    
+    """
+    拿到用于检测登录态的标签页。
+
+    单独开一个页而不是复用用户正在操作的页，是因为确认时要重新加载，
+    不能把用户正在填的登录表单刷掉。
+    """
+    
+    try:
+        if probe is not None and not probe.is_closed():
+            return probe
+        page = context.new_page()
+        page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30_000)
+        return page
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _reload_probe(page: Any) -> None:
+    
+    """
+    让探测页重新拿一次登录态。
+
+    这里用 goto 而不是 reload：reload 会沿用页面已有的缓存/状态，
+    实测登录后仍返回旧的匿名结果；重新导航才会按新 cookie 取。
+    """
+    
+    try:
+        page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30_000)
+        # 页面加载完还会自己跳转一下，稍等一下再发探测请求
+        page.wait_for_timeout(800)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def check_login() -> AuthInfo:
     
     """
@@ -149,9 +231,10 @@ def check_login() -> AuthInfo:
                 user_agent=_UA,
             )
             try:
-                # ------ 用 APIRequestContext 直接请求，不依赖当前页面停在哪个域名 ------ #
-                response = context.request.get(f"{USER_API}?t={int(time.time() * 1000)}")
-                logged_in, name = _parse_user_script(response.text())
+                page = context.new_page()
+                page.goto(HOME_URL, wait_until="domcontentloaded", timeout=60_000)
+                page.wait_for_timeout(800)
+                logged_in, name = _probe_login(page)
             finally:
                 browser.close()
     except Exception as exc:  # noqa: BLE001
@@ -167,6 +250,9 @@ def interactive_login(timeout_seconds: int = LOGIN_TIMEOUT_SECONDS) -> AuthInfo:
    
     """
     打开有头浏览器让用户登录，检测成功后保存登录态。
+
+    这里刻意不加载旧登录态：带着旧 cookie 打开的话，“已登录”可能还是上一个账号，
+    换号时会被误判成登录成功；从匿名状态开始，检测到就一定是这次真的登上了。
     """
     
     from playwright.sync_api import sync_playwright
@@ -177,10 +263,12 @@ def interactive_login(timeout_seconds: int = LOGIN_TIMEOUT_SECONDS) -> AuthInfo:
     print("  1. 在窗口里点右上角「登录」（没有自动弹出的话）")
     print("  2. 用你的组卷网账号完成扫码 / 账号密码登录")
     print("  3. 登录成功后不用关闭浏览器，脚本会自动检测并保存登录态")
+    print("（会额外开一个标签页专门检测登录状态，不用管它）")
     print()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, args=["--start-maximized"])
+        # ------ 不带 storage_state：从匿名态开始，检测到登录就一定是这次登上的 ------ #
         context = browser.new_context(
             locale="zh-CN",
             user_agent=_UA,
@@ -205,33 +293,41 @@ def interactive_login(timeout_seconds: int = LOGIN_TIMEOUT_SECONDS) -> AuthInfo:
         logged_in = False
         user_name = ""
         last_notice = 0.0
+        last_confirm = time.time()
+        # 起点是匿名态，正常情况下这里应该是空
+        baseline_token = _cookie_token(context)
+        probe = None
         try:
-            # ------ 轮询用户接口，比监听页面跳转稳：扫码、账号密码、换页都能覆盖 ------ #
             while time.time() < deadline:
                 if page.is_closed():
                     break
-                try:
-                    response = context.request.get(f"{USER_API}?t={int(time.time() * 1000)}")
-                    logged_in, user_name = _parse_user_script(response.text())
-                # ------ noqa: BLE001 - 忽略瞬时网络错误 ------ #
-                except Exception: 
-                    logged_in = False
-                if logged_in:
-                    break
                 now = time.time()
+                token = _cookie_token(context)
+                # ------ cookie 变了说明登录动作完成；没变也每 20 秒复核一次 ------ #
+                if (token and token != baseline_token) or now - last_confirm >= 20:
+                    probe = _ensure_probe_page(context, probe)
+                    if probe is not None:
+                        # 页面不重新导航的话，看到的还是登录前的状态
+                        _reload_probe(probe)
+                        logged_in, user_name = _probe_login(probe)
+                    last_confirm = now
+                    if logged_in:
+                        break
                 if now - last_notice > 10:
                     remaining = int(deadline - now)
                     print(f"  等待登录中…（剩余 {remaining} 秒）")
                     last_notice = now
-                time.sleep(2)
+                time.sleep(1.5)
 
             if logged_in:
                 # ----- 登录成功立刻存盘，不依赖用户主动关浏览器 ------ #
                 context.storage_state(path=str(paths.AUTH_FILE))
                 _write_meta(user_name=user_name)
                 print(f"\n登录成功：{user_name or '已登录'}，登录态已保存到 .temp/auth/auth.json")
+            elif page.is_closed():
+                print("\n浏览器窗口已关闭，登录态未更新。")
             else:
-                print("\n没有检测到登录完成，登录态未更新。")
+                print("\n等待超时，没有检测到登录完成，登录态未更新。")
         finally:
             try:
                 browser.close()
