@@ -25,7 +25,7 @@ import scrapy
 from scrapy.http import Response
 
 from .. import paths, status
-from ..extractor import normalize_paper_url, parse_paper, parse_paper_id
+from ..extractor import normalize_paper_url, parse_paper, parse_paper_id, usertk_url
 from ..items import PaperItem
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,8 @@ class PaperSpider(scrapy.Spider):
             "playwright_wait_state": "attached",
             "playwright_expand_answers": self.with_answers,
             "playwright_answers_limit": self.answers_limit,
+            # ------ 404/403 和 599 也要交给回调：自组试卷的普通地址就是 404，得能换 /usertk/ ------ #
+            "handle_httpstatus_list": [403, 404, 410, 599],
         }
         # ------ 展开答案后的 DOM 和普通页面内容不同，既不复用也不写入缓存 ------ #
         if self.no_cache or self.with_answers:
@@ -113,15 +115,26 @@ class PaperSpider(scrapy.Spider):
         return None
 
     def _parse(self, response: Response):
-        if response.status >= 400:
-            raise PaperError(f"页面返回 HTTP {response.status}，可能触发了站点风控，请稍后重试")
-
         html = response.text
 
         # ------ 存一份原始页面，解析结果不对时可以直接拿来复现 ------ #
         self._save_html(html)
 
-        problem = self._detect_problem(response)
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(html, "lxml")
+        except Exception:  # noqa: BLE001
+            soup = None
+
+        # ------ 普通链接 404 或没有题目，多半是“个人题库”里的自组试卷，换 /usertk/ 再试 ------ #
+        if self._should_try_usertk(response, soup):
+            return self._request_usertk(response)
+
+        if response.status >= 400:
+            raise PaperError(f"页面返回 HTTP {response.status}，可能触发了站点风控，请稍后重试")
+
+        problem = self._detect_problem(response, soup)
         if problem:
             raise PaperError(problem)
 
@@ -175,8 +188,39 @@ class PaperSpider(scrapy.Spider):
         except OSError:
             logger.debug("保存 HTML 失败", exc_info=True)
 
+    def _should_try_usertk(self, response: Response, soup: Any) -> bool:
+        
+        """
+        判断要不要把当前地址换成 /usertk/ 再抓一次。
+
+        只有“普通试卷链接 + 一个题目都没解析到 + 还没试过”这一种情况才换，
+        自组试卷的编号规则和普通试卷一样，光看编号分不出来。
+        """
+        
+        if response.meta.get("tried_usertk") or "/usertk/" in self.paper_url:
+            return False
+        if soup is None:
+            return True
+        return soup.select_one(".exam-list .tk-quest-item.quesroot") is None
+
+    def _request_usertk(self, response: Response) -> Any:
+        target = usertk_url(self.paper_id)
+        logger.info("[spider] 普通链接没有题目，改用个人题库地址重试：%s", target)
+        self.paper_url = target
+        # ------ 只带自己关心的开关，别把 download_slot 之类的内部 meta 也搬过去 ------ #
+        meta = {k: v for k, v in response.meta.items()
+                if k.startswith("playwright") or k == "dont_cache"}
+        meta["tried_usertk"] = True
+        return scrapy.Request(
+            target,
+            callback=self.parse,
+            errback=self.on_error,
+            meta=meta,
+            dont_filter=True,
+        )
+
     @staticmethod
-    def _detect_problem(response: Response) -> str | None:
+    def _detect_problem(response: Response, soup: Any = None) -> str | None:
         
         """
         把页面上能看出来的问题翻译成人话，返回 None 表示正常。
@@ -186,13 +230,13 @@ class PaperSpider(scrapy.Spider):
         """
         
         html = response.text
-        soup = None
-        try:
-            from bs4 import BeautifulSoup
+        if soup is None:
+            try:
+                from bs4 import BeautifulSoup
 
-            soup = BeautifulSoup(html, "lxml")
-        except Exception:  # noqa: BLE001
-            soup = None
+                soup = BeautifulSoup(html, "lxml")
+            except Exception:  # noqa: BLE001
+                soup = None
 
         if soup is not None:
             can_view = soup.select_one("#can_view_paper_all")
@@ -205,6 +249,9 @@ class PaperSpider(scrapy.Spider):
             if not soup.select_one(".exam-list .tk-quest-item.quesroot") and not soup.select_one(
                 ".exam-analyze"
             ):
+                if "/usertk/" in response.url:
+                    return ("普通链接和个人题库地址都没有找到这份试卷："
+                            "请检查编号是否正确，或确认这份自组试卷还在、当前账号有权限查看")
                 return "页面里没有题目内容，可能需要验证码或账号被限制，请稍后重试"
 
             if soup.select_one(".exam-list"):

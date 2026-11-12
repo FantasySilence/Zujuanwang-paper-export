@@ -86,7 +86,8 @@ def normalize_paper_url(raw: str) -> str:
 
     支持的输入::
 
-        https://zujuan.xkw.com/3p2856667.html
+        https://zujuan.xkw.com/3p2856667.html          普通试卷
+        https://zujuan.xkw.com/usertk/3p129898802.html 自己组的试卷（个人题库）
         https://zujuan.xkw.com/3p2856667.html?from=xx#comments
         3p2856667
         2856667
@@ -102,15 +103,53 @@ def normalize_paper_url(raw: str) -> str:
             raise ValueError("目前只支持组卷网（zujuan.xkw.com）的试卷网址")
         if re.fullmatch(r"https?://zujuan\.xkw\.com/\d+\.html", url):
             url = re.sub(r"/(\d+)\.html$", r"/3p\1.html", url)
-        if not re.fullmatch(r"https?://zujuan\.xkw\.com/3p\d+\.html", url):
-            raise ValueError("看起来不是试卷详情页网址，示例：https://zujuan.xkw.com/3p2856667.html")
+        # 自组试卷挂在 /usertk/ 下，路径不同但编号规则一样
+        if not re.fullmatch(r"https?://zujuan\.xkw\.com/(?:usertk/)?3p\d+\.html", url):
+            raise ValueError(
+                "看起来不是试卷详情页网址，示例："
+                "https://zujuan.xkw.com/3p2856667.html 或 https://zujuan.xkw.com/usertk/3p129898802.html"
+            )
         return url
 
+    # 只给编号时先按普通试卷打开，抓不到题目会自动换成 /usertk/ 再试一次
     if re.fullmatch(r"3p\d+", text):
         return f"https://zujuan.xkw.com/{text}.html"
     if re.fullmatch(r"\d{5,}", text):
         return f"https://zujuan.xkw.com/3p{text}.html"
     raise ValueError("无法识别的试卷网址，请粘贴形如 https://zujuan.xkw.com/3p2856667.html 的链接")
+
+
+def usertk_url(paper_id: str) -> str:
+    """同一份试卷在“个人题库”里的地址。"""
+    return f"https://zujuan.xkw.com/usertk/{paper_id}.html"
+
+
+def _page_title(soup: BeautifulSoup) -> str:
+    """取试卷标题。
+
+    普通试卷是 ``.title-txt > span.txt``，自组试卷直接是 ``span.title-txt``；
+    两者都没有时才退回 <title>，但要排掉“个人题库”这类站点标题。
+    """
+    for selector in ("h2.exam-title .title-txt .txt", "h2.exam-title .title-txt"):
+        element = soup.select_one(selector)
+        if element is not None:
+            text = element.get_text(" ", strip=True)
+            if text:
+                return text
+    if soup.title is not None:
+        text = soup.title.get_text(strip=True)
+        if text and text not in _GENERIC_TITLES:
+            return text
+    return ""
+
+
+_GENERIC_TITLES = {
+    "个人题库",
+    "组卷网",
+    "当前请求资源不存在",
+    "学科网-让教与学更高效",
+}
+
 
 
 def parse_paper(html: str, url: str) -> dict[str, Any]:
@@ -123,7 +162,7 @@ def parse_paper(html: str, url: str) -> dict[str, Any]:
     sections = _parse_sections(soup, pj)
     analysis = _parse_analysis(soup, pj)
 
-    title = meta.pop("title", "") or (soup.title.get_text(strip=True) if soup.title else "")
+    title = meta.pop("title", "") or _page_title(soup)
 
     return {
         "paper_id": paper_id,
@@ -166,9 +205,10 @@ def parse_paper_json(html: str) -> dict[str, Any]:
 def _parse_meta(soup: BeautifulSoup) -> dict[str, Any]:
     meta: dict[str, Any] = {}
 
-    title_tag = soup.select_one("h2.exam-title .title-txt .txt")
-    if title_tag:
-        meta["title"] = title_tag.get_text(" ", strip=True)
+    # 普通试卷和自组试卷的标题层级不同，统一交给 _page_title 处理
+    title = _page_title(soup)
+    if title:
+        meta["title"] = title
 
     # 信息栏前几项是纯值，后面是“标签：值”，混在一起只能按顺序拆
     plain: list[str] = []
