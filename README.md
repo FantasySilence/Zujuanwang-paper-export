@@ -101,21 +101,21 @@ start.bat
 
 要一次导几十份，用 `multi_run.py`。它没有交互界面，既能当脚本跑，也能当 Python 接口用。
 
-**命令行**：把网址一行一个写进文本文件（空行、`#` 注释会被忽略）。仓库里带了份 `urls.txt` 示例，直接照着改就行：
+**命令行**：把网址一行一个写进文本文件（空行、`#` 注释会被忽略）。仓库里带了份示例 `batch\data\urls.txt`，直接照着改就行：
 
 ```text
-# urls.txt
+# batch/data/urls.txt
 https://zujuan.xkw.com/3p2856667.html
 https://zujuan.xkw.com/usertk/3p129898802.html
 3p3506327
 ```
 
 ```powershell
-.\.venv\Scripts\python.exe multi_run.py urls.txt
+.\.venv\Scripts\python.exe multi_run.py batch\data\urls.txt
 
 # 常用参数
-.\.venv\Scripts\python.exe multi_run.py urls.txt -o output --answers --answers-limit 5
-.\.venv\Scripts\python.exe multi_run.py urls.txt -n 3p2856667=期中卷 -n 3p3506327=二模卷
+.\.venv\Scripts\python.exe multi_run.py batch\data\urls.txt -o output --answers --answers-limit 5
+.\.venv\Scripts\python.exe multi_run.py batch\data\urls.txt -n 3p2856667=期中卷 -n 3p3506327=二模卷
 ```
 
 输出长这样，每份一行，最后一页是汇总：
@@ -136,7 +136,7 @@ https://zujuan.xkw.com/usertk/3p129898802.html
 from multi_run import batch_export
 
 results = batch_export(
-    "urls.txt",                 # 也可以是网址列表，或一段带换行的文本
+    "batch/data/urls.txt",      # 也可以是网址列表，或一段带换行的文本
     out_dir="output",
     answers=False,              # 是否连带答案解析
     answers_limit=0,            # 每份最多导多少题答案，0=全部
@@ -236,12 +236,26 @@ run.py（CMD 菜单）
 ## 目录结构
 
 ```
-run.py                     CMD 交互入口
+run.py                     CMD 交互入口（只负责 import interactions 并启动）
+multi_run.py               批量导出入口（只负责 import batch 并启动）
 start.bat                  双击运行（UTF-8 代码页 + 结束暂停）
 scrapy.cfg                 Scrapy 项目配置入口
 requirements.txt           依赖（pip freeze）
-zujuan/
-  cli.py                   菜单、进度、缓存管理
+batch/                     批量导出层（非交互）
+  api.py                   batch_export 编排：串行/并发、进度、汇总
+  worker.py                单份试卷：抓子进程 → 读状态 → 生成 Word
+  sources.py               输入归一化（列表 / 文件 / 文本）
+  models.py                BatchResult / BatchContext
+  cli.py                   命令行参数解析
+  data/urls.txt            示例网址列表
+interactions/              命令行交互层
+  app.py                   参数解析 + 启动流程
+  banner.py                ASCII Banner 与账号状态
+  console.py               输入输出、是否真人操作、打开文件
+  menus.py                 主菜单与四个菜单项
+  export.py                单份导出：抓子进程 → 生成 Word
+  cache.py                 缓存列表、占用统计、清空
+zujuan/                    抓取与导出能力
   auth.py                  登录态检查 / 交互式登录 / 旧登录态迁移
   run_spider.py            子进程入口：跑一次 paper 爬虫
   spiders/paper.py         试卷爬虫（入口、校验、写状态）
@@ -251,7 +265,6 @@ zujuan/
   images.py                图片下载 + 本地缓存
   pipelines.py             JSON / CSV 落盘
   items.py, status.py, paths.py, settings.py
-multi_run.py               批量导出（无交互接口 + 命令行）
 ```
 
 ---
@@ -261,6 +274,10 @@ multi_run.py               批量导出（无交互接口 + 命令行）
 **登录态过期**（`登录态已失效，请重新运行登录`）
 菜单 `2` 会打开浏览器，手动登录完成后脚本自动检测并保存 `.temp\auth\auth.json`。
 登录态有效期约 1 天，过期后重跑一次菜单 2 即可（不需要退出工具）。
+
+检测时会在浏览器里额外开一个标签页（脚本用它确认登录状态），不用管它；
+登录成功后窗口会自动关闭，登录态已写入本地。换账号时也走这里，每次都是全新的匿名窗口，
+所以不会把上一个账号的登录态误当成本次的结果。
 
 **提示「该试卷需要更高权限」**
 该试卷对当前账号需要会员/下载券，工具无法绕过，只能换一份试卷或升级账号。
