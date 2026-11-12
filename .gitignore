@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+.test/
+.temp/
+
+# 导出的 Word 文档
+output/
+
