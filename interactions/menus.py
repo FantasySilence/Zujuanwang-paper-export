@@ -56,7 +56,9 @@ def menu_export() -> None:
     print()
     print("  把试卷详情页网址粘贴进来即可，例如：")
     print("    https://zujuan.xkw.com/3p2856667.html")
-    print("  （也可以只输入试卷编号，如 3p2856667）")
+    print("    https://zujuan.xkw.com/2p3041456.html")
+    print("  （也可以只输入试卷编号，如 3p2856667 / 2p3041456）")
+    print("  （前缀 2p / 3p 是两个不同的题库，同一编号可能是两份试卷，别改前缀）")
     print()
 
     while True:

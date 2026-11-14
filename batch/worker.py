@@ -43,25 +43,29 @@ def run_one(raw: str, context: BatchContext) -> BatchResult:
     result.paper_id = paper_id
     result.url = url
 
-    code, out, err = run_spider(url, paper_id, context)
+    # ------ 传给爬虫的是原始输入：只给了数字时它才能依次去 3p / 个人题库 / 2p 试 ------ #
+    code, out, err = run_spider(raw, paper_id, context)
     status = read_json(status_path(paper_id))
     if code != 0 or not status.get("ok"):
         result.error = status.get("error") or (err or out or "").strip() or "抓取失败"
         result.elapsed = time.perf_counter() - started
         return result
 
+    # ------ 只给了数字时，爬虫可能会换到另一个题库的地址才抓到，以它为准 ------ #
+    resolved_id = status.get("paper_id") or paper_id
+    result.paper_id = resolved_id
     result.title = status.get("title", "")
     result.question_count = int(status.get("question_count") or 0)
     result.answer_count = int(status.get("answer_count") or 0)
 
-    json_path = paths.paper_json_path(paper_id)
+    json_path = paths.paper_json_path(resolved_id)
     if not json_path.exists():
         result.error = f"没有找到解析结果：{json_path}"
         result.elapsed = time.perf_counter() - started
         return result
 
     try:
-        result.docx_path = build_docx(json_path, raw, url, paper_id, context)
+        result.docx_path = build_docx(json_path, raw, url, resolved_id, context)
         result.ok = True
     except Exception as exc:  # noqa: BLE001 - 生成失败也只影响这一份
         result.error = f"生成 Word 失败：{type(exc).__name__}: {exc}"

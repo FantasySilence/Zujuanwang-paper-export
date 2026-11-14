@@ -25,7 +25,7 @@ import scrapy
 from scrapy.http import Response
 
 from .. import paths, status
-from ..extractor import normalize_paper_url, parse_paper, parse_paper_id, usertk_url
+from ..extractor import parse_paper, parse_paper_id, plan_urls
 from ..items import PaperItem
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,14 @@ class PaperSpider(scrapy.Spider):
             self.answers_limit = 0
         self.no_cache = _truthy(no_cache)
 
-        self.paper_url = self._normalize_url(url, paper_id)
+        # ------ 用户可能只给编号、也可能整段复制网址，统一展开成候选地址 ------ #
+        raw_input = (url or "").strip() or (paper_id or "").strip()
+        try:
+            self.urls = plan_urls(raw_input)
+        except ValueError as exc:
+            raise PaperError(str(exc)) from exc
+        self._url_index = 0
+        self.paper_url = self.urls[0]
         self.paper_id = parse_paper_id(self.paper_url)
         self.html_path = paths.paper_html_path(self.paper_id)
 
@@ -127,9 +134,11 @@ class PaperSpider(scrapy.Spider):
         except Exception:  # noqa: BLE001
             soup = None
 
-        # ------ 普通链接 404 或没有题目，多半是“个人题库”里的自组试卷，换 /usertk/ 再试 ------ #
-        if self._should_try_usertk(response, soup):
-            return self._request_usertk(response)
+        # ------ 这个地址没有题目，就换下一个候选（个人题库 / 另一个题库的同号试卷） ------ #
+        if self._should_try_next(response, soup):
+            following = self._request_next(response)
+            if following is not None:
+                return following
 
         if response.status >= 400:
             raise PaperError(f"页面返回 HTTP {response.status}，可能触发了站点风控，请稍后重试")
@@ -188,29 +197,41 @@ class PaperSpider(scrapy.Spider):
         except OSError:
             logger.debug("保存 HTML 失败", exc_info=True)
 
-    def _should_try_usertk(self, response: Response, soup: Any) -> bool:
+    def _should_try_next(self, response: Response, soup: Any) -> bool:
         
         """
-        判断要不要把当前地址换成 /usertk/ 再抓一次。
+        判断要不要把当前地址换成列表里的下一个。
 
-        只有“普通试卷链接 + 一个题目都没解析到 + 还没试过”这一种情况才换，
-        自组试卷的编号规则和普通试卷一样，光看编号分不出来。
+        只有“这个地址一个题目都没解析到”这一种情况才换：试卷编号在普通题库和
+        个人题库里长得一样，光看编号分不出来，所以只能逐个试。
         """
         
-        if response.meta.get("tried_usertk") or "/usertk/" in self.paper_url:
+        if self._url_index + 1 >= len(self.urls):
             return False
         if soup is None:
             return True
         return soup.select_one(".exam-list .tk-quest-item.quesroot") is None
 
-    def _request_usertk(self, response: Response) -> Any:
-        target = usertk_url(self.paper_id)
-        logger.info("[spider] 普通链接没有题目，改用个人题库地址重试：%s", target)
+    def _request_next(self, response: Response) -> Any:
+        
+        """
+        换到下一个候选地址重抓；没有下一个时返回 None，交给调用方报错。
+        """
+        
+        self._url_index += 1
+        if self._url_index >= len(self.urls):
+            return None
+
+        target = self.urls[self._url_index]
+        logger.info("[spider] 这个地址没有题目，改试：%s", target)
+        # ------ 记住最终打开的是哪一份，缓存和解析都用它 ------ #
         self.paper_url = target
+        self.paper_id = parse_paper_id(target)
+        self.html_path = paths.paper_html_path(self.paper_id)
+
         # ------ 只带自己关心的开关，别把 download_slot 之类的内部 meta 也搬过去 ------ #
         meta = {k: v for k, v in response.meta.items()
                 if k.startswith("playwright") or k == "dont_cache"}
-        meta["tried_usertk"] = True
         return scrapy.Request(
             target,
             callback=self.parse,
@@ -219,8 +240,7 @@ class PaperSpider(scrapy.Spider):
             dont_filter=True,
         )
 
-    @staticmethod
-    def _detect_problem(response: Response, soup: Any = None) -> str | None:
+    def _detect_problem(self, response: Response, soup: Any = None) -> str | None:
         
         """
         把页面上能看出来的问题翻译成人话，返回 None 表示正常。
@@ -249,10 +269,7 @@ class PaperSpider(scrapy.Spider):
             if not soup.select_one(".exam-list .tk-quest-item.quesroot") and not soup.select_one(
                 ".exam-analyze"
             ):
-                if "/usertk/" in response.url:
-                    return ("普通链接和个人题库地址都没有找到这份试卷："
-                            "请检查编号是否正确，或确认这份自组试卷还在、当前账号有权限查看")
-                return "页面里没有题目内容，可能需要验证码或账号被限制，请稍后重试"
+                return self._not_found_message()
 
             if soup.select_one(".exam-list"):
                 return None
@@ -269,17 +286,28 @@ class PaperSpider(scrapy.Spider):
                 return message
         return None
 
-    @staticmethod
-    def _normalize_url(url: str | None, paper_id: str | None) -> str:
+    def _not_found_message(self) -> str:
         
         """
-        命令行可能传网址，也可能只传试卷编号，这里统一成详情页网址。
+        所有候选地址都没打开出题目时给用户看的说明。
+
+        编号前缀 2p / 3p 是站内两套题库，同一个数字在两边可能是两份完全不同的
+        试卷，所以这里要提醒用户看链接，而不是只让他反复核对数字。
         """
-        raw = (url or "").strip() or (paper_id or "").strip()
-        try:
-            return normalize_paper_url(raw)
-        except ValueError as exc:
-            raise PaperError(str(exc)) from exc
+        
+        tried = self.urls[: self._url_index + 1]
+        if len(tried) > 1:
+            return ("普通链接和个人题库地址都没有找到这份试卷（已试 "
+                    + "、".join(tried) + "）。请检查编号是否完整；"
+                    "若编号无误，注意链接前缀 2p/3p 属于不同题库，同号可能是两份不同的试卷，"
+                    "建议直接粘贴试卷页地址栏里的完整链接。")
+        if "/usertk/" in self.paper_url:
+            return ("个人题库地址里没有找到这份试卷：请确认这份自组试卷还在、"
+                    "当前账号就是它的创建者，或换用试卷页地址栏里的完整链接重试")
+        return ("页面里没有可解析的题目：" + self.paper_url + " 。"
+                "可能需要验证码、账号被限制，或这份试卷已删除/当前账号无权查看；"
+                "另外链接前缀 2p/3p 属于站内不同题库，同号可能是两份不同的试卷，"
+                "如果这份确实存在，请从试卷页重新复制一次完整链接。")
 
 
 def _truthy(value: Any) -> bool:

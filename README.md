@@ -61,12 +61,16 @@ start.bat
 
 选 `1`，粘贴试卷网址，按提示回答「是否导答案」「文件叫什么名字」，等十几秒，Word 就会出现在 `output\` 目录里。
 
-两种网址都支持：
+站内有多套题库，试卷网址的前缀就是题库编号，都支持：
 
-- 现成试卷：`https://zujuan.xkw.com/3p2856667.html`
+- 3 号题库（居多）：`https://zujuan.xkw.com/3p2856667.html`
+- 2 号题库：`https://zujuan.xkw.com/2p3041456.html`
+- 4 号 / 5 号题库：`https://zujuan.xkw.com/4p3279339.html`、`https://zujuan.xkw.com/5p2491890.html`
 - 自己组的试卷（个人题库）：`https://zujuan.xkw.com/usertk/3p129898802.html`
 
-只输入编号（如 `3p129898802`）也行：程序会先按普通试卷打开，发现没有题目时自动换到 `/usertk/` 地址再试一次。
+> 前缀要原样保留：同一个数字在不同题库里是**不同**的试卷，把 `2p3041456` 改写成 `3p3041456` 打不开任何东西。
+
+只输入编号（如 `3p129898802`）也行：程序会先按普通试卷打开，发现没有题目时自动换到 `/usertk/` 地址再试一次；如果连前缀都没写（只给 `3041456`），还会再试一次另一个题库的同号试卷，抓到了会提示实际用的是哪个编号。
 
 ### 也可以直接用命令行
 
@@ -260,8 +264,18 @@ zujuan/                    抓取与导出能力
   run_spider.py            子进程入口：跑一次 paper 爬虫
   spiders/paper.py         试卷爬虫（入口、校验、写状态）
   playwright_handler.py    Playwright 下载处理器
-  extractor.py             HTML → 结构化数据（纯函数，可离线测试）
-  docx_writer.py           结构化数据 → Word
+  extractor/               HTML → 结构化数据（纯函数，可离线跑）
+    urls.py                网址与试卷编号（2p / 3p / 4p / 5p 是不同题库）
+    blocks.py              题面 HTML → 段落 / 表格 / 图片
+    questions.py           按题型分节、逐题抽取
+    meta.py                标题、元信息、页内 paperJson、分析表
+  docx_writer/             结构化数据 → Word
+    options.py             排版选项与常量
+    naming.py              文件名
+    styles.py              页面 / 样式 / 字体
+    image_run.py           图片插入（含 JPEG 补头）
+    render.py              段落 / 表格 / 选项表
+    document.py            整篇骨架：标题、分节、答案附录
   images.py                图片下载 + 本地缓存
   pipelines.py             JSON / CSV 落盘
   items.py, status.py, paths.py, settings.py
@@ -290,6 +304,26 @@ zujuan/                    抓取与导出能力
 直接粘贴完整网址即可；只贴编号时程序会自动回退到 `/usertk/` 试一次。
 如果两个地址都提示「没有题目内容」，通常是这份自组试卷已被删除，或当前登录的账号不是它的创建者。
 
+**提示「普通链接和个人题库地址都没有找到这份试卷」**
+先核对编号有没有缺位。编号对了还不行，就看链接前缀：`2p` / `3p` / `4p` / `5p` 是站内不同题库，
+同一个数字在两边可能是两份完全不同的试卷，前缀写错就等于在找另一份卷子。
+最省事的办法是从试卷页地址栏重新复制一次完整链接。
+
+**排版：选项会不会被分页拆开**
+选择题的「题干 + 插图 + A/B/C/D 选项表」会尽量排在同一页，选项表本身也不会跨页断开。
+代价是个别题会把整题推到下一页，留下一些空白——试卷是要打印的，题目完整比省纸重要。
+
+**数学 / 物理 / 化学卷里的公式、电路图、实验装置图**
+这些内容在网页上本来就是图片（`staticzujuan.xkw.com/quesimg/...`），工具会原样下载并插进 Word，
+行内公式与文字同段落排，分数、根式、上下标都按图片的原始尺寸呈现，不会变成乱码。
+由于图片不跟随正文字号缩放，同一行里公式会比中文字略小或略大，这是站方给图的固有结果；
+化学式的上下标（H₂SO₄、Fe²⁺）则是文字加真上下标，不是图片。
+答案与解析同样是整张图片，要导答案请加 `--answers`。
+
+**用 LibreOffice / WPS 打开时，选项外面多出一圈浅灰细线**
+无边框选项表在 Word 里是干净的，但 LibreOffice（可能还有 WPS）会把没有表格样式的表格按默认样式画出框线。
+`output\` 里的 .docx 本身没有边框，用 Word 打开或打印都不会出现。
+
 **答案解析图片是「加载超时，请重新进入页面查看」**
 组卷网的答案图片 URL 带时效签名。`--answers` 导出时请**当场生成 Word**（菜单 1 会自动生成），
 不要隔天再用旧 JSON 重新生成；已下载的答案图片会缓存进 `.temp\images`，只要当时成功下载就能反复复用。
@@ -302,7 +336,8 @@ zujuan/                    抓取与导出能力
 生成时会检测到并自动另存为 `标题_20260101_120000.docx`。
 
 **想换按钮文字 / 字体 / 页边距**
-改 `zujuan\docx_writer.py` 顶部的常量与 `DocxOptions`；`font_body`、`font_heading`、`body_size` 都可以按需调整。
+改 `zujuan\docx_writer\options.py` 里的常量与 `DocxOptions`；`font_body`、`font_heading`、`body_size` 都可以按需调整，
+页边距在 `styles.py` 的 `setup_page`。
 
 **想批量抓多份试卷**
 直接循环调用即可，爬虫本身是标准 Scrapy spider：

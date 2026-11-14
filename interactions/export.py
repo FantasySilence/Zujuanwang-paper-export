@@ -48,7 +48,8 @@ def export_paper(
 
     # ------ 先清掉上次的结果，抓完读到的就一定是这次的 ------ #
     status.clear()
-    code, _out, err = run_spider(url, answers=answers, answers_limit=answers_limit, no_cache=no_cache)
+    # ------ 交给爬虫的是用户的原始输入：只给了数字时它才能依次去 3p / 个人题库 / 2p 试 ------ #
+    code, _out, err = run_spider(raw_url, answers=answers, answers_limit=answers_limit, no_cache=no_cache)
     result = status.read()
 
     if code != 0 or not result.get("ok"):
@@ -60,6 +61,12 @@ def export_paper(
     print(f"  [OK] 抓取完成：{result.get('section_count')} 个题型 / {result.get('question_count')} 道题"
           + (f"（答案解析 {result.get('answer_count')} 张）" if result.get("answer_count") else ""))
 
+    resolved_id = result.get("paper_id") or paper_id
+    # ------ 只给了数字时可能换了题库地址，得告诉用户最后打开的是哪一份 ------ #
+    if resolved_id != paper_id:
+        print(f"  [提示] 这份试卷在另一个题库：{resolved_id}（原按 {paper_id} 找不到）")
+
+    # ------ 编号以爬虫最后真正打开的那份为准（只给数字时可能换了题库地址） ------ #
     json_path = paths.paper_json_path(result.get("paper_id") or paper_id)
     if not json_path.exists():
         print(f"\n  [X]  没有找到解析结果：{json_path}")
